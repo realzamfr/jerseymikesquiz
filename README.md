@@ -1,9 +1,9 @@
 <!--
-	Project: JerseyMikesQuiz
+	Project: Jersey Mikes Quiz
 	Author: zamhvh
 	© 2026 All Rights Reserved
 	
-	Unauthorized copying, modification, or distribution without the expressed written consent of Samuel Jenkins is prohibitied.
+	Any form of unauthorized copying, modification, or distribution of this code and all its contents without the expressed written consent of Samuel Jenkins is prohibited and could lead to legal action.
 -->
 
 <html lang="en">
@@ -41,6 +41,9 @@ body{
   color:var(--text);
   min-height:100vh;
   padding:32px 16px 64px;
+  /* Prevent text selection during drag */
+  -webkit-user-select:none;
+  user-select:none;
 }
 .wrap{max-width:680px;margin:auto}
 .header{margin-bottom:28px}
@@ -98,37 +101,74 @@ body{
   align-items:flex-start;
   transition:border-color .2s,background .2s;
 }
+/* Desktop drag-over state */
 .dropzone.over{border-color:var(--blue);background:var(--blue-bg)}
+/* Mobile tap-to-add visual cue: dropzone is always a valid target */
+.dropzone.tap-target{border-color:var(--blue);border-style:dashed}
 .hint{font-size:13px;color:var(--faint);align-self:center;padding:4px 8px;pointer-events:none}
 .pool-area{margin-top:16px}
 .pool{display:flex;flex-wrap:wrap;gap:6px}
+
+/* Base chip */
 .chip{
   display:inline-flex;align-items:center;gap:6px;
-  padding:6px 12px;
+  padding:8px 14px;
   background:var(--surface2);
   border:1px solid var(--border);
   border-radius:var(--radius-sm);
-  cursor:grab;
   user-select:none;
   font-size:13px;
   color:var(--text);
-  transition:background .15s,border-color .15s,opacity .15s;
-  -webkit-user-drag:element;
+  transition:background .15s,border-color .15s,opacity .15s,transform .1s;
+  touch-action:none; /* allow our custom touch handling */
+  min-height:36px; /* bigger touch target on mobile */
 }
-.chip:hover{background:var(--faint);border-color:var(--border2)}
-.chip.in-drop{cursor:default;background:var(--surface2)}
-.chip.dragging{opacity:.35}
+
+/* Pool chip (can be added) */
+.chip.pool-chip{
+  cursor:grab;
+}
+.chip.pool-chip:hover{background:var(--faint);border-color:var(--border2)}
+
+/* Tap-mode: highlight selected chip in pool */
+.chip.pool-chip.tapped{
+  background:var(--blue-bg);
+  border-color:var(--blue);
+  color:var(--blue);
+}
+
+/* Drop chip (inside dropzone) */
+.chip.in-drop{cursor:default;}
+.chip.in-drop:hover{background:var(--surface2)}
+
+/* Dragging ghost */
+.chip.dragging{opacity:.3;transform:scale(0.96)}
+
+/* Floating drag ghost (cloned element) */
+#dragGhost{
+  position:fixed;
+  pointer-events:none;
+  z-index:9999;
+  opacity:.85;
+  transform:scale(1.05);
+  transition:none;
+  border-color:var(--blue);
+  background:var(--blue-bg);
+  color:var(--text);
+}
+
 .rm{
   background:none;border:none;cursor:pointer;
   color:var(--muted);font-size:14px;line-height:1;
   padding:0;display:inline-flex;align-items:center;justify-content:center;
-  width:14px;height:14px;
+  width:18px;height:18px;
+  flex-shrink:0;
 }
 .rm:hover{color:var(--red)}
 .nav{display:flex;align-items:center;justify-content:space-between;margin-top:12px}
 .step{font-size:13px;color:var(--muted);font-family:'DM Mono',monospace}
 .btn{
-  padding:9px 20px;
+  padding:10px 20px;
   border:1px solid var(--border2);
   border-radius:var(--radius-sm);
   background:transparent;
@@ -137,13 +177,14 @@ body{
   cursor:pointer;
   font-family:'DM Sans',sans-serif;
   transition:background .15s,border-color .15s;
+  min-height:40px;
 }
 .btn:hover{background:var(--surface2);border-color:var(--border2)}
 .btn.primary{background:var(--blue);border-color:var(--blue);color:#fff}
 .btn.primary:hover{background:#3178d4;border-color:#3178d4}
 .mw-option{
   display:flex;align-items:flex-start;gap:10px;
-  padding:12px 14px;
+  padding:14px;
   border:1px solid var(--border);
   border-radius:var(--radius-sm);
   margin-bottom:8px;
@@ -189,13 +230,24 @@ body{
 .tag.extra{background:var(--red-bg);color:var(--red)}
 .actions{display:flex;gap:8px;margin-top:12px}
 .hidden{display:none}
+
+/* Mobile hint bar */
+.mobile-hint{
+  font-size:12px;color:var(--muted);
+  text-align:center;
+  margin-bottom:10px;
+  display:none;
+}
+@media(hover:none){
+  .mobile-hint{display:block}
+}
 </style>
 </head>
 <body>
 <div class="wrap">
   <div class="header">
     <h1>Jersey Mike's Quiz</h1>
-    <p>Drag the correct ingredients into each sub</p>
+    <p>Add the correct ingredients to each sub</p>
   </div>
   <div class="progress-track"><div class="progress-fill" id="pf"></div></div>
   <div id="subScreen"></div>
@@ -228,33 +280,227 @@ const MW={
   ans:0
 };
 
-let idx=0,subsAns=[],mwAns=-1,dragged=null;
+let idx=0, subsAns=[], mwAns=-1;
 
+// ─── Drag state (desktop HTML5 + touch) ───────────────────────────────────────
+let dragged=null;       // name string being dragged
+let ghost=null;         // floating DOM clone for touch drag
+let touchSrc=null;      // source chip element for touch drag
+let touchOffX=0, touchOffY=0;
+
+// ─── Tap state (mobile tap-to-add) ────────────────────────────────────────────
+let tappedChip=null;    // currently selected pool chip name (tap mode)
+
+// Detect if the device primarily uses touch (no fine pointer)
+const isTouchDevice=()=>window.matchMedia('(hover:none)').matches;
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 function setPct(v){document.getElementById("pf").style.width=v+"%";}
 function pct(){setPct(idx/SUBS.length*100);}
 
-function chip(name,inDrop){
-  const c=document.createElement("span");
-  c.className="chip"+(inDrop?" in-drop":"");
-  c.dataset.v=name;
-  c.draggable=!inDrop;
-  if(!inDrop){
-    c.ondragstart=e=>{dragged=name;c.classList.add("dragging");e.dataTransfer.effectAllowed="move";};
-    c.ondragend=()=>c.classList.remove("dragging");
-  }
-  if(inDrop){
-    c.innerHTML=`${name} <button class="rm" title="Remove" onclick="returnChip('${name.replace(/'/g,"\\'")}')">&#x2715;</button>`;
+function getDropzone(){return document.getElementById("dz");}
+function getPool(){return document.getElementById("pool");}
+
+function getDropzoneItems(){
+  return [...getDropzone().querySelectorAll(".chip")].map(x=>x.dataset.v);
+}
+
+function hint(){
+  const h=document.createElement("span");
+  h.className="hint";h.id="hint";
+  h.textContent=isTouchDevice()?"Tap an ingredient below to add":"Drag items here";
+  return h;
+}
+
+function refreshHint(){
+  const dz=getDropzone();
+  const h=document.getElementById("hint");
+  if(dz.querySelectorAll(".chip").length===0){
+    if(!h) dz.appendChild(hint());
   } else {
-    c.textContent=name;
+    if(h) h.remove();
   }
+}
+
+// ─── Chip factory ─────────────────────────────────────────────────────────────
+function makeDropChip(name){
+  const c=document.createElement("span");
+  c.className="chip in-drop";
+  c.dataset.v=name;
+  c.innerHTML=`${name}<button class="rm" title="Remove">&#x2715;</button>`;
+  c.querySelector(".rm").addEventListener("click",e=>{
+    e.stopPropagation();
+    returnChip(name);
+  });
   return c;
 }
 
+function makePoolChip(name){
+  const c=document.createElement("span");
+  c.className="chip pool-chip";
+  c.dataset.v=name;
+  c.draggable=true;
+  c.textContent=name;
+
+  // ── Desktop drag events ──
+  c.addEventListener("dragstart",e=>{
+    dragged=name;
+    c.classList.add("dragging");
+    e.dataTransfer.effectAllowed="move";
+  });
+  c.addEventListener("dragend",()=>{
+    c.classList.remove("dragging");
+    dragged=null;
+  });
+
+  // ── Touch drag events ──
+  c.addEventListener("touchstart",onTouchStart,{passive:false});
+
+  // ── Tap-to-add (touch) ──
+  c.addEventListener("click",()=>{
+    if(!isTouchDevice()) return; // desktop handles via drag
+    handleTapOnPoolChip(name, c);
+  });
+
+  return c;
+}
+
+// ─── Desktop drop handling ─────────────────────────────────────────────────────
+function bindDropzone(dz){
+  dz.addEventListener("dragover",e=>{e.preventDefault();dz.classList.add("over");});
+  dz.addEventListener("dragleave",()=>dz.classList.remove("over"));
+  dz.addEventListener("drop",e=>{
+    e.preventDefault();
+    dz.classList.remove("over");
+    if(!dragged) return;
+    addToDropzone(dragged);
+    dragged=null;
+  });
+}
+
+// ─── Touch drag handling ──────────────────────────────────────────────────────
+function onTouchStart(e){
+  if(isTouchDevice()) return; // let tap handler deal with it on touch-primary devices
+  const touch=e.touches[0];
+  const chip=e.currentTarget;
+  const name=chip.dataset.v;
+  const rect=chip.getBoundingClientRect();
+  touchOffX=touch.clientX-rect.left;
+  touchOffY=touch.clientY-rect.top;
+  touchSrc=chip;
+
+  // Create ghost
+  ghost=chip.cloneNode(true);
+  ghost.id="dragGhost";
+  ghost.classList.add("chip");
+  ghost.style.width=rect.width+"px";
+  ghost.style.left=(touch.clientX-touchOffX)+"px";
+  ghost.style.top=(touch.clientY-touchOffY)+"px";
+  document.body.appendChild(ghost);
+
+  chip.classList.add("dragging");
+  e.preventDefault();
+
+  document.addEventListener("touchmove",onTouchMove,{passive:false});
+  document.addEventListener("touchend",onTouchEnd);
+}
+
+function onTouchMove(e){
+  if(!ghost) return;
+  const touch=e.touches[0];
+  ghost.style.left=(touch.clientX-touchOffX)+"px";
+  ghost.style.top=(touch.clientY-touchOffY)+"px";
+  e.preventDefault();
+}
+
+function onTouchEnd(e){
+  document.removeEventListener("touchmove",onTouchMove);
+  document.removeEventListener("touchend",onTouchEnd);
+  if(!ghost||!touchSrc) return;
+
+  const touch=e.changedTouches[0];
+  ghost.remove(); ghost=null;
+  touchSrc.classList.remove("dragging");
+
+  const name=touchSrc.dataset.v;
+  touchSrc=null;
+
+  // Hit test: is the finger over the dropzone?
+  const dz=getDropzone();
+  if(!dz) return;
+  const r=dz.getBoundingClientRect();
+  if(touch.clientX>=r.left&&touch.clientX<=r.right&&
+     touch.clientY>=r.top&&touch.clientY<=r.bottom){
+    addToDropzone(name);
+  }
+}
+
+// ─── Tap-to-add (touch primary devices) ──────────────────────────────────────
+function handleTapOnPoolChip(name, chipEl){
+  // If already tapped, deselect
+  if(tappedChip===name){
+    chipEl.classList.remove("tapped");
+    tappedChip=null;
+    getDropzone().classList.remove("tap-target");
+    return;
+  }
+  // Deselect previous
+  if(tappedChip){
+    const prev=getPool().querySelector(`[data-v="${CSS.escape(tappedChip)}"]`);
+    if(prev) prev.classList.remove("tapped");
+  }
+  tappedChip=name;
+  chipEl.classList.add("tapped");
+  // Highlight dropzone as target
+  getDropzone().classList.add("tap-target");
+}
+
+// Tapping the dropzone when a chip is selected adds it
+function bindDropzoneTap(dz){
+  dz.addEventListener("click",()=>{
+    if(!tappedChip) return;
+    addToDropzone(tappedChip);
+    tappedChip=null;
+    dz.classList.remove("tap-target");
+  });
+}
+
+// ─── Core add/remove ─────────────────────────────────────────────────────────
+function addToDropzone(name){
+  const dz=getDropzone();
+  const pool=getPool();
+  if(getDropzoneItems().includes(name)) return; // already there
+  const fromPool=pool.querySelector(`[data-v="${CSS.escape(name)}"]`);
+  if(fromPool) fromPool.remove();
+  dz.appendChild(makeDropChip(name));
+  refreshHint();
+}
+
+function returnChip(name){
+  const dz=getDropzone();
+  const c=[...dz.querySelectorAll(".chip")].find(x=>x.dataset.v===name);
+  if(c) c.remove();
+  refreshHint();
+  const pool=getPool();
+  if(!pool.querySelector(`[data-v="${CSS.escape(name)}"]`)){
+    pool.appendChild(makePoolChip(name));
+  }
+  // Deselect tap if returning the tapped chip
+  if(tappedChip===name){
+    tappedChip=null;
+    dz.classList.remove("tap-target");
+  }
+}
+
+// ─── Render ──────────────────────────────────────────────────────────────────
 function renderSub(){
   pct();
+  tappedChip=null;
   const s=SUBS[idx];
   const ss=document.getElementById("subScreen");
+  ss.classList.remove("hidden");
   ss.innerHTML=`
+    <div class="mobile-hint">Tap an ingredient to select it, then tap the box above to add it</div>
     <div class="card">
       <div class="sub-num">${s.num}</div>
       <div class="sub-name">${s.name}</div>
@@ -267,56 +513,34 @@ function renderSub(){
     </div>
     <div class="nav">
       <span class="step">${idx+1} / ${SUBS.length+1}</span>
-      <button class="btn primary" onclick="nextQ()">Next &rarr;</button>
+      <button class="btn primary" id="nextBtn">Next &rarr;</button>
     </div>
   `;
+
   const dz=document.getElementById("dz");
   dz.appendChild(hint());
-  dz.ondragover=e=>{e.preventDefault();dz.classList.add("over");};
-  dz.ondragleave=()=>dz.classList.remove("over");
-  dz.ondrop=onDrop;
-  POOL.forEach(p=>document.getElementById("pool").appendChild(chip(p,false)));
-}
+  bindDropzone(dz);
+  bindDropzoneTap(dz);
 
-function hint(){
-  const h=document.createElement("span");
-  h.className="hint";h.id="hint";h.textContent="Drag items here";return h;
-}
+  document.getElementById("nextBtn").addEventListener("click",nextQ);
 
-function onDrop(e){
-  e.preventDefault();
-  const dz=document.getElementById("dz");
-  dz.classList.remove("over");
-  if(!dragged) return;
-  const exists=[...dz.querySelectorAll(".chip")].map(x=>x.dataset.v);
-  if(exists.includes(dragged)){dragged=null;return;}
-  const fromPool=[...document.getElementById("pool").querySelectorAll(".chip")].find(x=>x.dataset.v===dragged);
-  if(fromPool) fromPool.remove();
-  const h=document.getElementById("hint");
-  if(h) h.remove();
-  dz.appendChild(chip(dragged,true));
-  dragged=null;
-}
-
-function returnChip(name){
-  const dz=document.getElementById("dz");
-  const c=[...dz.querySelectorAll(".chip")].find(x=>x.dataset.v===name);
-  if(c) c.remove();
-  if(!dz.querySelector(".chip")) dz.appendChild(hint());
-  document.getElementById("pool").appendChild(chip(name,false));
+  const pool=document.getElementById("pool");
+  POOL.forEach(p=>pool.appendChild(makePoolChip(p)));
 }
 
 function saveAns(){
-  const dz=document.getElementById("dz");
-  subsAns[idx]=[...dz.querySelectorAll(".chip")].map(x=>x.dataset.v);
+  subsAns[idx]=getDropzoneItems();
 }
 
 function nextQ(){
-  saveAns();idx++;
+  saveAns();
+  idx++;
+  tappedChip=null;
   if(idx>=SUBS.length){startMW();return;}
   renderSub();
 }
 
+// ─── Mike's Way ──────────────────────────────────────────────────────────────
 function startMW(){
   document.getElementById("subScreen").classList.add("hidden");
   const ms=document.getElementById("mwScreen");
@@ -327,16 +551,20 @@ function startMW(){
       <div class="sub-num">Mike's Way</div>
       <div class="sub-name" style="margin-bottom:16px">${MW.q}</div>
       ${MW.opts.map((o,i)=>`
-        <div class="mw-option" id="opt${i}" onclick="selMW(${i})">
+        <div class="mw-option" id="opt${i}">
           <input type="radio" name="mw" id="mwr${i}" value="${i}">
           <label for="mwr${i}">${o}</label>
         </div>`).join("")}
     </div>
     <div class="nav">
       <span class="step">${SUBS.length+1} / ${SUBS.length+1}</span>
-      <button class="btn primary" onclick="finish()">See results &rarr;</button>
+      <button class="btn primary" id="finBtn">See results &rarr;</button>
     </div>
   `;
+  MW.opts.forEach((_,i)=>{
+    document.getElementById("opt"+i).addEventListener("click",()=>selMW(i));
+  });
+  document.getElementById("finBtn").addEventListener("click",finish);
 }
 
 function selMW(i){
@@ -346,6 +574,7 @@ function selMW(i){
   mwAns=i;
 }
 
+// ─── Results ─────────────────────────────────────────────────────────────────
 function finish(){
   document.getElementById("mwScreen").classList.add("hidden");
   const rs=document.getElementById("resultScreen");
@@ -419,6 +648,8 @@ function finish(){
 }
 
 function toggle(id){document.getElementById(id).classList.toggle("open");}
+
+// ─── Init ─────────────────────────────────────────────────────────────────────
 renderSub();
 </script>
 </body>
