@@ -6,7 +6,6 @@
 	Unauthorized copying, modification, or distribution without the expressed written consent of Samuel Jenkins is prohibitied.
 -->
 
-<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8"/>
